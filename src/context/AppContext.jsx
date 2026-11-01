@@ -1,70 +1,58 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
-import { INITIAL_COMMUNITY_POTS, RANDOM_USERNAMES, VINTAGE_STAMPS } from '../lib/mockData';
 import { supabase, isSupabaseConfigured } from '../lib/supabase';
+import { RANDOM_USERNAMES, VINTAGE_STAMPS } from '../lib/mockData';
 
 const AppContext = createContext();
 
 export const AppProvider = ({ children }) => {
-  // Session & Auth state
   const [session, setSession] = useState(null);
-  const [authError, setAuthError] = useState(null);
-  const [isAuthModalOpen, setIsAuthModalOpen] = useState(false);
-
-  // User Profile
-  const [currentUser, setCurrentUser] = useState(() => {
-    const saved = localStorage.getItem('little_pots_user');
-    if (saved) {
-      try { return JSON.parse(saved); } catch (e) { /* ignore */ }
-    }
-    const defaultName = RANDOM_USERNAMES[Math.floor(Math.random() * RANDOM_USERNAMES.length)];
-    return {
-      id: 'user_' + Math.random().toString(36).substring(2, 9),
-      name: defaultName,
-      email: null,
-      bio: "A traveler seeking quiet words and honest thoughts.",
-      stampPreference: VINTAGE_STAMPS[0],
-      createdAt: new Date().toISOString(),
-      isRegistered: false
-    };
-  });
-
-  // Pots collection
-  const [pots, setPots] = useState(() => {
-    const saved = localStorage.getItem('little_pots_items');
-    if (saved) {
-      try { return JSON.parse(saved); } catch (e) { /* ignore */ }
-    }
-    return INITIAL_COMMUNITY_POTS;
-  });
-
-  // Sound preference
+  const [loading, setLoading] = useState(true);
+  const [currentUser, setCurrentUser] = useState(null);
+  const [pots, setPots] = useState([]);
   const [audioEnabled, setAudioEnabled] = useState(false);
 
-  // Sync Supabase Auth listener if configured
+  // Initialize Auth state
   useEffect(() => {
-    if (!isSupabaseConfigured || !supabase) return;
+    if (isSupabaseConfigured && supabase) {
+      supabase.auth.getSession().then(({ data: { session } }) => {
+        setSession(session);
+        if (session?.user) {
+          fetchUserProfile(session.user);
+          loadPots(session.user.id);
+        } else {
+          setLoading(false);
+        }
+      });
 
-    supabase.auth.getSession().then(({ data: { session } }) => {
-      setSession(session);
-      if (session?.user) {
-        fetchSupabaseProfile(session.user);
-        loadSupabasePots(session.user.id);
+      const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
+        setSession(session);
+        if (session?.user) {
+          fetchUserProfile(session.user);
+          loadPots(session.user.id);
+        } else {
+          setCurrentUser(null);
+          setPots([]);
+          setLoading(false);
+        }
+      });
+
+      return () => subscription.unsubscribe();
+    } else {
+      // Local fallback session check
+      const cached = localStorage.getItem('little_pots_auth_user');
+      if (cached) {
+        try {
+          const parsed = JSON.parse(cached);
+          setCurrentUser(parsed);
+          setSession({ user: { id: parsed.id } });
+          loadLocalPots(parsed.id);
+        } catch (e) {}
       }
-    });
-
-    const { data: { subscription } } = supabase.auth.onAuthStateChange((_event, session) => {
-      setSession(session);
-      if (session?.user) {
-        fetchSupabaseProfile(session.user);
-        loadSupabasePots(session.user.id);
-      }
-    });
-
-    return () => subscription.unsubscribe();
+      setLoading(false);
+    }
   }, []);
 
-  // Fetch Supabase user profile
-  const fetchSupabaseProfile = async (authUser) => {
+  const fetchUserProfile = async (authUser) => {
     try {
       const { data, error } = await supabase
         .from('profiles')
@@ -75,23 +63,39 @@ export const AppProvider = ({ children }) => {
       if (data) {
         setCurrentUser({
           id: data.id,
-          name: data.username || authUser.email?.split('@')[0],
+          name: data.username,
           email: authUser.email,
           bio: data.bio || '',
-          stampPreference: data.stamp_preference || VINTAGE_STAMPS[0],
-          createdAt: data.created_at,
-          isRegistered: true
+          stampPreference: data.stamp_preference || '🌿 Cedar Leaf',
+          createdAt: data.created_at
+        });
+      } else {
+        // Create default profile if not present
+        const fallbackName = authUser.email.split('@')[0];
+        await supabase.from('profiles').insert({
+          id: authUser.id,
+          username: fallbackName,
+          stamp_preference: '🌿 Cedar Leaf'
+        });
+        setCurrentUser({
+          id: authUser.id,
+          name: fallbackName,
+          email: authUser.email,
+          bio: '',
+          stampPreference: '🌿 Cedar Leaf',
+          createdAt: new Date().toISOString()
         });
       }
     } catch (err) {
-      console.warn("Could not fetch remote profile:", err);
+      console.error("Error fetching user profile:", err);
+    } finally {
+      setLoading(false);
     }
   };
 
-  // Load pots from Supabase
-  const loadSupabasePots = async (userId) => {
+  const loadPots = async (userId) => {
     try {
-      const { data: potsData, error } = await supabase
+      const { data, error } = await supabase
         .from('pots')
         .select(`
           id,
@@ -113,8 +117,8 @@ export const AppProvider = ({ children }) => {
         `)
         .order('created_at', { ascending: false });
 
-      if (potsData && potsData.length > 0) {
-        const formatted = potsData.map(p => ({
+      if (data) {
+        const formatted = data.map(p => ({
           id: p.id,
           senderId: p.sender_id,
           senderName: p.sender?.username || 'Anonymous Wanderer',
@@ -134,23 +138,25 @@ export const AppProvider = ({ children }) => {
         setPots(formatted);
       }
     } catch (err) {
-      console.warn("Could not fetch remote pots:", err);
+      console.error("Error loading pots:", err);
     }
   };
 
-  // Cache user to localStorage
-  useEffect(() => {
-    localStorage.setItem('little_pots_user', JSON.stringify(currentUser));
-  }, [currentUser]);
+  const loadLocalPots = (userId) => {
+    const saved = localStorage.getItem('little_pots_items');
+    if (saved) {
+      try {
+        setPots(JSON.parse(saved));
+      } catch (e) {
+        setPots([]);
+      }
+    } else {
+      setPots([]);
+    }
+  };
 
-  // Cache pots to localStorage
-  useEffect(() => {
-    localStorage.setItem('little_pots_items', JSON.stringify(pots));
-  }, [pots]);
-
-  // Register user (supports both Supabase cloud and simulated local session)
-  const register = async (email, password, username, stampPreference) => {
-    setAuthError(null);
+  // Register new user
+  const registerUser = async (email, password, username, stamp) => {
     if (isSupabaseConfigured && supabase) {
       const { data, error } = await supabase.auth.signUp({
         email,
@@ -164,69 +170,160 @@ export const AppProvider = ({ children }) => {
       if (data?.user) {
         await supabase.from('profiles').upsert({
           id: data.user.id,
-          username: username,
-          stamp_preference: stampPreference || VINTAGE_STAMPS[0]
+          username,
+          stamp_preference: stamp || '🌿 Cedar Leaf'
         });
       }
+      return data;
+    } else {
+      // Local fallback mode
+      const localId = 'usr_' + Date.now().toString(36);
+      const userObj = {
+        id: localId,
+        name: username,
+        email,
+        bio: '',
+        stampPreference: stamp || '🌿 Cedar Leaf',
+        createdAt: new Date().toISOString()
+      };
+      localStorage.setItem('little_pots_auth_user', JSON.stringify(userObj));
+      setCurrentUser(userObj);
+      setSession({ user: { id: localId } });
+      return { user: userObj };
     }
-
-    // Update state & cache
-    const userObj = {
-      id: session?.user?.id || 'reg_' + Math.random().toString(36).substring(2, 9),
-      name: username,
-      email: email,
-      bio: "A registered wanderer with an active postal desk.",
-      stampPreference: stampPreference || VINTAGE_STAMPS[0],
-      createdAt: new Date().toISOString(),
-      isRegistered: true
-    };
-    setCurrentUser(userObj);
-    return userObj;
   };
 
-  // Login user
-  const login = async (email, password) => {
-    setAuthError(null);
+  // Login existing user
+  const loginUser = async (email, password) => {
     if (isSupabaseConfigured && supabase) {
       const { data, error } = await supabase.auth.signInWithPassword({
         email,
         password
       });
       if (error) throw error;
-      if (data?.user) {
-        await fetchSupabaseProfile(data.user);
-      }
+      return data;
     } else {
-      // Local fallback session
-      setCurrentUser(prev => ({
-        ...prev,
-        email,
+      // Local fallback mode
+      const localId = 'usr_' + Date.now().toString(36);
+      const userObj = {
+        id: localId,
         name: email.split('@')[0],
-        isRegistered: true
-      }));
+        email,
+        bio: '',
+        stampPreference: '🌿 Cedar Leaf',
+        createdAt: new Date().toISOString()
+      };
+      localStorage.setItem('little_pots_auth_user', JSON.stringify(userObj));
+      setCurrentUser(userObj);
+      setSession({ user: { id: localId } });
+      return { user: userObj };
     }
   };
 
   // Sign out
-  const logout = async () => {
+  const logoutUser = async () => {
     if (isSupabaseConfigured && supabase) {
       await supabase.auth.signOut();
     }
-    const defaultName = RANDOM_USERNAMES[Math.floor(Math.random() * RANDOM_USERNAMES.length)];
-    const freshGuest = {
-      id: 'guest_' + Math.random().toString(36).substring(2, 9),
-      name: defaultName,
-      email: null,
-      bio: "A traveler seeking quiet words and honest thoughts.",
-      stampPreference: VINTAGE_STAMPS[0],
-      createdAt: new Date().toISOString(),
-      isRegistered: false
-    };
-    setCurrentUser(freshGuest);
+    localStorage.removeItem('little_pots_auth_user');
+    setCurrentUser(null);
     setSession(null);
+    setPots([]);
   };
 
-  // Play mechanical typewriter click
+  // Cast pot
+  const castPot = async ({ title, content, stamp }) => {
+    const potTitle = title.trim() || 'Untitled Letter';
+    const potContent = content.trim();
+    const potStamp = stamp || currentUser?.stampPreference || '🌿 Cedar Leaf';
+
+    if (isSupabaseConfigured && supabase && currentUser) {
+      const { data, error } = await supabase.rpc('cast_random_pot', {
+        p_title: potTitle,
+        p_content: potContent,
+        p_stamp: potStamp
+      });
+      if (error) {
+        // Fallback standard insert if RPC has issues
+        await supabase.from('pots').insert({
+          sender_id: currentUser.id,
+          title: potTitle,
+          content: potContent,
+          stamp: potStamp
+        });
+      }
+      await loadPots(currentUser.id);
+    } else if (currentUser) {
+      const newPot = {
+        id: 'pot_' + Date.now().toString(36),
+        senderId: currentUser.id,
+        senderName: currentUser.name,
+        recipientId: 'stranger_peer',
+        title: potTitle,
+        content: potContent,
+        stamp: potStamp,
+        createdAt: new Date().toISOString(),
+        replies: []
+      };
+      const updated = [newPot, ...pots];
+      setPots(updated);
+      localStorage.setItem('little_pots_items', JSON.stringify(updated));
+    }
+  };
+
+  // Reply to pot
+  const replyToPot = async (potId, replyText) => {
+    if (!replyText.trim() || !currentUser) return;
+
+    if (isSupabaseConfigured && supabase) {
+      const { error } = await supabase.from('pot_replies').insert({
+        pot_id: potId,
+        author_id: currentUser.id,
+        content: replyText.trim()
+      });
+      if (error) throw error;
+      await loadPots(currentUser.id);
+    } else {
+      const newReply = {
+        id: 'rep_' + Date.now().toString(36),
+        authorId: currentUser.id,
+        authorName: currentUser.name,
+        content: replyText.trim(),
+        createdAt: new Date().toISOString()
+      };
+      const updated = pots.map(p => {
+        if (p.id === potId) {
+          return { ...p, replies: [...(p.replies || []), newReply] };
+        }
+        return p;
+      });
+      setPots(updated);
+      localStorage.setItem('little_pots_items', JSON.stringify(updated));
+    }
+  };
+
+  // Update profile
+  const updateProfile = async (name, bio, stampPreference) => {
+    if (!currentUser) return;
+
+    if (isSupabaseConfigured && supabase) {
+      await supabase.from('profiles').update({
+        username: name.trim(),
+        bio: bio.trim(),
+        stamp_preference: stampPreference
+      }).eq('id', currentUser.id);
+    }
+
+    const updated = {
+      ...currentUser,
+      name: name.trim(),
+      bio: bio.trim(),
+      stampPreference
+    };
+    setCurrentUser(updated);
+    localStorage.setItem('little_pots_auth_user', JSON.stringify(updated));
+  };
+
   const playTypewriterSound = () => {
     if (!audioEnabled) return;
     try {
@@ -244,130 +341,21 @@ export const AppProvider = ({ children }) => {
     } catch (e) {}
   };
 
-  // Cast a new pot
-  const castPot = async ({ title, content, stamp }) => {
-    const potPayload = {
-      title: title.trim() || 'Untitled Dispatch',
-      content: content.trim(),
-      stamp: stamp || currentUser.stampPreference
-    };
-
-    // If Supabase is active, call RPC or table insert
-    if (isSupabaseConfigured && supabase && session?.user) {
-      try {
-        const { data, error } = await supabase.rpc('cast_random_pot', {
-          p_title: potPayload.title,
-          p_content: potPayload.content,
-          p_stamp: potPayload.stamp
-        });
-        if (!error && data) {
-          loadSupabasePots(session.user.id);
-          return;
-        }
-      } catch (err) {
-        console.warn("Supabase pot cast fallback:", err);
-      }
-    }
-
-    // Local simulation fallback
-    const possibleRecipients = ['current_user', 'user_marcus', 'user_hazel', 'user_elena', 'user_stranger_82']
-      .filter(id => id !== currentUser.id);
-    const chosenRecipient = possibleRecipients[Math.floor(Math.random() * possibleRecipients.length)];
-
-    const newPot = {
-      id: 'pot_' + Date.now().toString(36) + '_' + Math.random().toString(36).substring(2, 6),
-      senderId: currentUser.id,
-      senderName: currentUser.name,
-      recipientId: chosenRecipient,
-      title: potPayload.title,
-      content: potPayload.content,
-      createdAt: new Date().toISOString(),
-      stamp: potPayload.stamp,
-      replies: []
-    };
-
-    setPots(prev => [newPot, ...prev]);
-    return newPot;
-  };
-
-  // Reply to an existing pot
-  const replyToPot = async (potId, replyText) => {
-    if (!replyText.trim()) return;
-
-    if (isSupabaseConfigured && supabase && session?.user) {
-      try {
-        await supabase.from('pot_replies').insert({
-          pot_id: potId,
-          author_id: session.user.id,
-          content: replyText.trim()
-        });
-        loadSupabasePots(session.user.id);
-        return;
-      } catch (err) {
-        console.warn("Supabase reply fallback:", err);
-      }
-    }
-
-    const newReply = {
-      id: 'reply_' + Date.now().toString(36),
-      authorId: currentUser.id,
-      authorName: currentUser.name,
-      content: replyText.trim(),
-      createdAt: new Date().toISOString(),
-    };
-
-    setPots(prev => prev.map(p => {
-      if (p.id === potId) {
-        return {
-          ...p,
-          replies: [...(p.replies || []), newReply]
-        };
-      }
-      return p;
-    }));
-  };
-
-  const updateProfile = (name, bio, stampPreference) => {
-    setCurrentUser(prev => ({
-      ...prev,
-      name: name.trim() || prev.name,
-      bio: bio.trim(),
-      stampPreference: stampPreference || prev.stampPreference
-    }));
-  };
-
-  const switchIdentity = (newName) => {
-    const freshId = 'user_' + Math.random().toString(36).substring(2, 9);
-    setCurrentUser({
-      id: freshId,
-      name: newName || RANDOM_USERNAMES[Math.floor(Math.random() * RANDOM_USERNAMES.length)],
-      email: null,
-      bio: "Another traveler wandering through the postal shelves.",
-      stampPreference: VINTAGE_STAMPS[Math.floor(Math.random() * VINTAGE_STAMPS.length)],
-      createdAt: new Date().toISOString(),
-      isRegistered: false
-    });
-  };
-
   return (
     <AppContext.Provider value={{
       currentUser,
       session,
       pots,
+      loading,
+      loginUser,
+      registerUser,
+      logoutUser,
       castPot,
       replyToPot,
       updateProfile,
-      switchIdentity,
-      register,
-      login,
-      logout,
-      isAuthModalOpen,
-      setIsAuthModalOpen,
-      authError,
       audioEnabled,
       setAudioEnabled,
-      playTypewriterSound,
-      isSupabaseConfigured
+      playTypewriterSound
     }}>
       {children}
     </AppContext.Provider>
