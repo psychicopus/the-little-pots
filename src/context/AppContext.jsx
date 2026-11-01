@@ -97,21 +97,11 @@ export const AppProvider = ({ children }) => {
       // 1. Fetch pots
       const { data: potsData, error: potsErr } = await supabase
         .from('pots')
-        .select(`
-          id,
-          title,
-          content,
-          stamp,
-          status,
-          created_at,
-          sender_id,
-          recipient_id,
-          profiles:sender_id(username)
-        `)
+        .select('*')
         .order('created_at', { ascending: false });
 
       if (potsErr) {
-        console.warn("Error fetching pots:", potsErr);
+        console.error("Error fetching pots:", potsErr);
         return;
       }
 
@@ -120,20 +110,38 @@ export const AppProvider = ({ children }) => {
         return;
       }
 
-      // 2. Fetch replies for these pots
+      // 2. Fetch profiles map
+      const senderIds = [...new Set(potsData.map(p => p.sender_id).filter(Boolean))];
+      let userMap = {};
+      if (senderIds.length > 0) {
+        const { data: profs } = await supabase
+          .from('profiles')
+          .select('id, username')
+          .in('id', senderIds);
+        (profs || []).forEach(pr => {
+          userMap[pr.id] = pr.username;
+        });
+      }
+
+      // 3. Fetch replies
       const potIds = potsData.map(p => p.id);
       const { data: repliesData } = await supabase
         .from('pot_replies')
-        .select(`
-          id,
-          pot_id,
-          content,
-          created_at,
-          author_id,
-          profiles:author_id(username)
-        `)
+        .select('*')
         .in('pot_id', potIds)
         .order('created_at', { ascending: true });
+
+      // Fetch author usernames for replies
+      const replyAuthorIds = [...new Set((repliesData || []).map(r => r.author_id).filter(Boolean))];
+      if (replyAuthorIds.length > 0) {
+        const { data: rProfs } = await supabase
+          .from('profiles')
+          .select('id, username')
+          .in('id', replyAuthorIds);
+        (rProfs || []).forEach(pr => {
+          userMap[pr.id] = pr.username;
+        });
+      }
 
       const repliesByPot = {};
       (repliesData || []).forEach(r => {
@@ -141,7 +149,7 @@ export const AppProvider = ({ children }) => {
         repliesByPot[r.pot_id].push({
           id: r.id,
           authorId: r.author_id,
-          authorName: r.profiles?.username || 'Stranger',
+          authorName: userMap[r.author_id] || 'Stranger',
           content: r.content,
           createdAt: r.created_at
         });
@@ -150,7 +158,7 @@ export const AppProvider = ({ children }) => {
       const formatted = potsData.map(p => ({
         id: p.id,
         senderId: p.sender_id,
-        senderName: p.profiles?.username || 'Anonymous Wanderer',
+        senderName: userMap[p.sender_id] || 'Anonymous Wanderer',
         recipientId: p.recipient_id,
         title: p.title,
         content: p.content,
@@ -267,32 +275,29 @@ export const AppProvider = ({ children }) => {
 
     if (isSupabaseConfigured && supabase && currentUser) {
       try {
-        const { error: rpcErr } = await supabase.rpc('cast_random_pot', {
-          p_title: potTitle,
-          p_content: potContent,
-          p_stamp: potStamp
+        // Find other users to assign as recipient
+        const { data: otherProfiles } = await supabase
+          .from('profiles')
+          .select('id')
+          .neq('id', currentUser.id)
+          .limit(20);
+
+        let chosenRecipientId = null;
+        if (otherProfiles && otherProfiles.length > 0) {
+          chosenRecipientId = otherProfiles[Math.floor(Math.random() * otherProfiles.length)].id;
+        }
+
+        const { error: insErr } = await supabase.from('pots').insert({
+          sender_id: currentUser.id,
+          recipient_id: chosenRecipientId,
+          title: potTitle,
+          content: potContent,
+          stamp: potStamp
         });
 
-        if (rpcErr) {
-          // If RPC fails, direct fallback insert with a random existing profile
-          const { data: otherProfiles } = await supabase
-            .from('profiles')
-            .select('id')
-            .neq('id', currentUser.id)
-            .limit(10);
-
-          let chosenRecipientId = null;
-          if (otherProfiles && otherProfiles.length > 0) {
-            chosenRecipientId = otherProfiles[Math.floor(Math.random() * otherProfiles.length)].id;
-          }
-
-          await supabase.from('pots').insert({
-            sender_id: currentUser.id,
-            recipient_id: chosenRecipientId,
-            title: potTitle,
-            content: potContent,
-            stamp: potStamp
-          });
+        if (insErr) {
+          console.error("Insert pot error:", insErr);
+          throw insErr;
         }
 
         await loadPots(currentUser.id);
