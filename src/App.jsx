@@ -1,24 +1,24 @@
 import React, { useState } from 'react';
 import { Header } from './components/Header';
 import { Compose } from './components/Compose';
-import { PotsInbox } from './components/PotsInbox';
+import { PotsWall } from './components/PotsWall';
 import { Profile } from './components/Profile';
 import { WelcomeAuthScreen } from './components/WelcomeAuthScreen';
 import { useApp } from './context/AppContext';
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState('inbox'); // 'inbox' | 'compose' | 'profile'
+  const [activeTab, setActiveTab] = useState('wall'); // 'wall' | 'compose' | 'profile'
   const { currentUser, loading } = useApp();
 
   if (loading) {
     return (
       <div className="min-h-screen flex items-center justify-center font-typewriter text-xs text-[#7e5a3e]">
-        <span>Loading postal desk...</span>
+        <span>Opening postal records...</span>
       </div>
     );
   }
 
-  // If user is not authenticated/registered, lock into clean Welcome Auth Screen
+  // Welcome / Login / Register gate
   if (!currentUser) {
     return <WelcomeAuthScreen />;
   }
@@ -28,13 +28,13 @@ export default function App() {
       <div>
         <Header activeTab={activeTab} setActiveTab={setActiveTab} />
         
-        <main className="transition-all duration-300 max-w-4xl mx-auto px-4">
-          {activeTab === 'inbox' && (
-            <PotsInbox onOpenCompose={() => setActiveTab('compose')} />
+        <main className="transition-all duration-300 max-w-5xl mx-auto px-4">
+          {activeTab === 'wall' && (
+            <PotsWall onOpenCompose={() => setActiveTab('compose')} />
           )}
 
           {activeTab === 'compose' && (
-            <Compose onSent={() => setActiveTab('inbox')} />
+            <Compose onSent={() => setActiveTab('wall')} />
           )}
 
           {activeTab === 'profile' && (
@@ -49,7 +49,7 @@ export default function App() {
           "Words in small vessels, delivered by quiet currents."
         </p>
         <p className="text-[10px] text-[#936e4e] mt-0.5">
-          The Little Pots • An Anonymous Text Exchange
+          The Little Pots • Public Community Wall & Penpal Archive
         </p>
       </footer>
     </div>

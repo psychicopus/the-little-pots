@@ -18,7 +18,7 @@ export const AppProvider = ({ children }) => {
         setSession(session);
         if (session?.user) {
           fetchUserProfile(session.user);
-          loadPots(session.user.id);
+          loadPots();
         } else {
           setLoading(false);
         }
@@ -28,7 +28,7 @@ export const AppProvider = ({ children }) => {
         setSession(session);
         if (session?.user) {
           fetchUserProfile(session.user);
-          loadPots(session.user.id);
+          loadPots();
         } else {
           setCurrentUser(null);
           setPots([]);
@@ -38,7 +38,7 @@ export const AppProvider = ({ children }) => {
 
       return () => subscription.unsubscribe();
     } else {
-      // Local fallback mode for offline testing
+      // Offline fallback mode
       const cached = localStorage.getItem('little_pots_auth_user');
       if (cached) {
         try {
@@ -63,7 +63,7 @@ export const AppProvider = ({ children }) => {
       if (data) {
         setCurrentUser({
           id: data.id,
-          name: data.username,
+          name: data.username || authUser.email.split('@')[0],
           email: authUser.email,
           bio: data.bio || '',
           stampPreference: data.stamp_preference || '🌿 Cedar Leaf',
@@ -92,9 +92,10 @@ export const AppProvider = ({ children }) => {
     }
   };
 
-  const loadPots = async (userId) => {
+  // Load all pots for the Public Wall
+  const loadPots = async () => {
     try {
-      // 1. Fetch pots
+      // 1. Fetch all pots
       const { data: potsData, error: potsErr } = await supabase
         .from('pots')
         .select('*')
@@ -110,44 +111,28 @@ export const AppProvider = ({ children }) => {
         return;
       }
 
-      // 2. Fetch profiles map
-      const senderIds = [...new Set(potsData.map(p => p.sender_id).filter(Boolean))];
-      let userMap = {};
-      if (senderIds.length > 0) {
-        const { data: profs } = await supabase
-          .from('profiles')
-          .select('id, username')
-          .in('id', senderIds);
-        (profs || []).forEach(pr => {
-          userMap[pr.id] = pr.username;
-        });
-      }
+      // 2. Fetch all profiles to map usernames
+      const { data: profs } = await supabase
+        .from('profiles')
+        .select('id, username');
+      
+      const userMap = {};
+      (profs || []).forEach(pr => {
+        userMap[pr.id] = pr.username;
+      });
 
-      // 3. Fetch replies
-      const potIds = potsData.map(p => p.id);
+      // 3. Fetch all replies
       const { data: repliesData } = await supabase
         .from('pot_replies')
         .select('*')
-        .in('pot_id', potIds)
         .order('created_at', { ascending: true });
-
-      // Fetch author usernames for replies
-      const replyAuthorIds = [...new Set((repliesData || []).map(r => r.author_id).filter(Boolean))];
-      if (replyAuthorIds.length > 0) {
-        const { data: rProfs } = await supabase
-          .from('profiles')
-          .select('id, username')
-          .in('id', replyAuthorIds);
-        (rProfs || []).forEach(pr => {
-          userMap[pr.id] = pr.username;
-        });
-      }
 
       const repliesByPot = {};
       (repliesData || []).forEach(r => {
         if (!repliesByPot[r.pot_id]) repliesByPot[r.pot_id] = [];
         repliesByPot[r.pot_id].push({
           id: r.id,
+          potId: r.pot_id,
           authorId: r.author_id,
           authorName: userMap[r.author_id] || 'Stranger',
           content: r.content,
@@ -159,7 +144,6 @@ export const AppProvider = ({ children }) => {
         id: p.id,
         senderId: p.sender_id,
         senderName: userMap[p.sender_id] || 'Anonymous Wanderer',
-        recipientId: p.recipient_id,
         title: p.title,
         content: p.content,
         stamp: p.stamp,
@@ -186,14 +170,17 @@ export const AppProvider = ({ children }) => {
     }
   };
 
-  // Register new user
+  // Register
   const registerUser = async (email, password, username, stamp) => {
     if (isSupabaseConfigured && supabase) {
       const { data, error } = await supabase.auth.signUp({
         email,
         password,
         options: {
-          data: { username }
+          data: { 
+            username,
+            stamp_preference: stamp || '🌿 Cedar Leaf'
+          }
         }
       });
       if (error) throw error;
@@ -205,11 +192,10 @@ export const AppProvider = ({ children }) => {
           stamp_preference: stamp || '🌿 Cedar Leaf'
         });
         await fetchUserProfile(data.user);
-        await loadPots(data.user.id);
+        await loadPots();
       }
       return data;
     } else {
-      // Local fallback mode
       const localId = 'usr_' + Date.now().toString(36);
       const userObj = {
         id: localId,
@@ -226,7 +212,7 @@ export const AppProvider = ({ children }) => {
     }
   };
 
-  // Login existing user
+  // Login
   const loginUser = async (email, password) => {
     if (isSupabaseConfigured && supabase) {
       const { data, error } = await supabase.auth.signInWithPassword({
@@ -236,7 +222,7 @@ export const AppProvider = ({ children }) => {
       if (error) throw error;
       if (data?.user) {
         await fetchUserProfile(data.user);
-        await loadPots(data.user.id);
+        await loadPots();
       }
       return data;
     } else {
@@ -267,50 +253,31 @@ export const AppProvider = ({ children }) => {
     setPots([]);
   };
 
-  // Cast pot
+  // Cast pot to the public wall
   const castPot = async ({ title, content, stamp }) => {
     const potTitle = title.trim() || 'Untitled Letter';
     const potContent = content.trim();
     const potStamp = stamp || currentUser?.stampPreference || '🌿 Cedar Leaf';
 
     if (isSupabaseConfigured && supabase && currentUser) {
-      try {
-        // Find other users to assign as recipient
-        const { data: otherProfiles } = await supabase
-          .from('profiles')
-          .select('id')
-          .neq('id', currentUser.id)
-          .limit(20);
+      const { error: insErr } = await supabase.from('pots').insert({
+        sender_id: currentUser.id,
+        title: potTitle,
+        content: potContent,
+        stamp: potStamp
+      });
 
-        let chosenRecipientId = null;
-        if (otherProfiles && otherProfiles.length > 0) {
-          chosenRecipientId = otherProfiles[Math.floor(Math.random() * otherProfiles.length)].id;
-        }
-
-        const { error: insErr } = await supabase.from('pots').insert({
-          sender_id: currentUser.id,
-          recipient_id: chosenRecipientId,
-          title: potTitle,
-          content: potContent,
-          stamp: potStamp
-        });
-
-        if (insErr) {
-          console.error("Insert pot error:", insErr);
-          throw insErr;
-        }
-
-        await loadPots(currentUser.id);
-      } catch (e) {
-        console.error("Cast error:", e);
+      if (insErr) {
+        console.error("Cast pot error:", insErr);
+        throw insErr;
       }
+
+      await loadPots();
     } else if (currentUser) {
-      // Local testing mode
       const newPot = {
         id: 'pot_' + Date.now().toString(36),
         senderId: currentUser.id,
         senderName: currentUser.name,
-        recipientId: 'other_user',
         title: potTitle,
         content: potContent,
         stamp: potStamp,
@@ -323,7 +290,7 @@ export const AppProvider = ({ children }) => {
     }
   };
 
-  // Reply to pot
+  // Reply to any pot
   const replyToPot = async (potId, replyText) => {
     if (!replyText.trim() || !currentUser) return;
 
@@ -337,10 +304,11 @@ export const AppProvider = ({ children }) => {
         console.error("Reply error:", error);
         throw error;
       }
-      await loadPots(currentUser.id);
+      await loadPots();
     } else {
       const newReply = {
         id: 'rep_' + Date.now().toString(36),
+        potId,
         authorId: currentUser.id,
         authorName: currentUser.name,
         content: replyText.trim(),
@@ -411,7 +379,7 @@ export const AppProvider = ({ children }) => {
       audioEnabled,
       setAudioEnabled,
       playTypewriterSound,
-      refreshPots: () => currentUser && loadPots(currentUser.id)
+      refreshPots: loadPots
     }}>
       {children}
     </AppContext.Provider>

@@ -1,6 +1,6 @@
 -- =========================================================================
--- FIX & STREAMLINE SCRIPT FOR "THE LITTLE POTS"
--- Run this in Supabase SQL Editor
+-- THE LITTLE POTS: PUBLIC WALL & COMMUNITY REPLIES
+-- Copy and run this in Supabase SQL Editor
 -- =========================================================================
 
 -- 1. Profiles Table
@@ -12,58 +12,52 @@ CREATE TABLE IF NOT EXISTS public.profiles (
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
--- Enable RLS
 ALTER TABLE public.profiles ENABLE ROW LEVEL SECURITY;
 
-DROP POLICY IF EXISTS "Public profiles are viewable by everyone." ON public.profiles;
-CREATE POLICY "Public profiles are viewable by everyone."
+DROP POLICY IF EXISTS "Anyone can view profiles" ON public.profiles;
+CREATE POLICY "Anyone can view profiles"
   ON public.profiles FOR SELECT USING (true);
 
-DROP POLICY IF EXISTS "Users can insert their own profile." ON public.profiles;
-CREATE POLICY "Users can insert their own profile."
-  ON public.profiles FOR INSERT WITH CHECK (auth.uid() = id);
+DROP POLICY IF EXISTS "Anyone can insert profile" ON public.profiles;
+CREATE POLICY "Anyone can insert profile"
+  ON public.profiles FOR INSERT WITH CHECK (true);
 
-DROP POLICY IF EXISTS "Users can update own profile." ON public.profiles;
-CREATE POLICY "Users can update own profile."
+DROP POLICY IF EXISTS "Anyone can update own profile" ON public.profiles;
+CREATE POLICY "Anyone can update own profile"
   ON public.profiles FOR UPDATE USING (auth.uid() = id);
 
 
--- 2. Pots Table
+-- 2. Pots Table (Public Wall Dispatches)
 CREATE TABLE IF NOT EXISTS public.pots (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   sender_id UUID REFERENCES public.profiles(id) ON DELETE CASCADE,
-  recipient_id UUID REFERENCES public.profiles(id) ON DELETE SET NULL,
+  recipient_id UUID,
   title TEXT NOT NULL,
   content TEXT NOT NULL,
   stamp TEXT DEFAULT '🌿 Cedar Leaf',
-  status TEXT DEFAULT 'pending',
+  status TEXT DEFAULT 'active',
   created_at TIMESTAMPTZ DEFAULT NOW()
 );
 
 ALTER TABLE public.pots ENABLE ROW LEVEL SECURITY;
 
--- Allow authenticated users to view pots that are:
--- 1. Sent by them
--- 2. Addressed directly to them
--- 3. Unassigned floating pots from other people
+-- PUBLIC WALL: Everyone (logged in) can read ALL pots!
+DROP POLICY IF EXISTS "Anyone logged in can view all pots" ON public.pots;
 DROP POLICY IF EXISTS "Users can view relevant pots" ON public.pots;
-CREATE POLICY "Users can view relevant pots"
-  ON public.pots FOR SELECT
-  USING (
-    auth.uid() IS NOT NULL AND (
-      auth.uid() = sender_id OR 
-      auth.uid() = recipient_id OR 
-      (recipient_id IS NULL AND sender_id != auth.uid())
-    )
-  );
+DROP POLICY IF EXISTS "Users can view pots they sent or received" ON public.pots;
 
+CREATE POLICY "Anyone logged in can view all pots"
+  ON public.pots FOR SELECT
+  USING (true);
+
+-- Anyone authenticated can cast a pot
 DROP POLICY IF EXISTS "Authenticated users can cast pots" ON public.pots;
 CREATE POLICY "Authenticated users can cast pots"
   ON public.pots FOR INSERT
   WITH CHECK (auth.uid() = sender_id);
 
 
--- 3. Replies Table
+-- 3. Replies Table (Comments on Pots)
 CREATE TABLE IF NOT EXISTS public.pot_replies (
   id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   pot_id UUID REFERENCES public.pots(id) ON DELETE CASCADE,
@@ -74,43 +68,39 @@ CREATE TABLE IF NOT EXISTS public.pot_replies (
 
 ALTER TABLE public.pot_replies ENABLE ROW LEVEL SECURITY;
 
+-- Everyone can read all replies
+DROP POLICY IF EXISTS "Anyone can view replies" ON public.pot_replies;
 DROP POLICY IF EXISTS "Authenticated users can view replies" ON public.pot_replies;
-CREATE POLICY "Authenticated users can view replies"
-  ON public.pot_replies FOR SELECT
-  USING (auth.uid() IS NOT NULL);
+DROP POLICY IF EXISTS "Participants can view replies" ON public.pot_replies;
 
+CREATE POLICY "Anyone can view replies"
+  ON public.pot_replies FOR SELECT
+  USING (true);
+
+-- Anyone authenticated can add a reply to any pot
 DROP POLICY IF EXISTS "Authenticated users can insert replies" ON public.pot_replies;
 CREATE POLICY "Authenticated users can insert replies"
   ON public.pot_replies FOR INSERT
   WITH CHECK (auth.uid() = author_id);
 
 
--- 4. Cast Pot Function
-CREATE OR REPLACE FUNCTION cast_random_pot(
-  p_title TEXT,
-  p_content TEXT,
-  p_stamp TEXT
-)
-RETURNS UUID
-LANGUAGE plpgsql
-SECURITY DEFINER
-AS $$
-DECLARE
-  v_recipient_id UUID;
-  v_new_pot_id UUID;
+-- 4. Guaranteed Profile Trigger
+CREATE OR REPLACE FUNCTION public.handle_new_user()
+RETURNS TRIGGER AS $$
 BEGIN
-  -- Look for an existing profile that is NOT the sender
-  SELECT id INTO v_recipient_id
-  FROM public.profiles
-  WHERE id != auth.uid()
-  ORDER BY RANDOM()
-  LIMIT 1;
-
-  -- Insert with recipient_id (or NULL if no other user exists yet)
-  INSERT INTO public.pots (sender_id, recipient_id, title, content, stamp)
-  VALUES (auth.uid(), v_recipient_id, p_title, p_content, p_stamp)
-  RETURNING id INTO v_new_pot_id;
-
-  RETURN v_new_pot_id;
+  INSERT INTO public.profiles (id, username, stamp_preference)
+  VALUES (
+    NEW.id,
+    COALESCE(NEW.raw_user_meta_data->>'username', split_part(NEW.email, '@', 1)),
+    COALESCE(NEW.raw_user_meta_data->>'stamp_preference', '🌿 Cedar Leaf')
+  )
+  ON CONFLICT (id) DO UPDATE SET
+    username = EXCLUDED.username;
+  RETURN NEW;
 END;
-$$;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+DROP TRIGGER IF EXISTS on_auth_user_created ON auth.users;
+CREATE TRIGGER on_auth_user_created
+  AFTER INSERT ON auth.users
+  FOR EACH ROW EXECUTE FUNCTION public.handle_new_user();

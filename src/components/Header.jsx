@@ -1,5 +1,5 @@
 import React from 'react';
-import { Mail, Send, User, Volume2, VolumeX, Feather, LogOut } from 'lucide-react';
+import { LayoutGrid, Send, User, Volume2, VolumeX, Feather, LogOut } from 'lucide-react';
 import { useApp } from '../context/AppContext';
 
 export const Header = ({ activeTab, setActiveTab }) => {
@@ -7,11 +7,11 @@ export const Header = ({ activeTab, setActiveTab }) => {
 
   return (
     <header className="border-b border-[#d2bea3] bg-[#fbf6ec]/90 backdrop-blur-sm sticky top-0 z-40">
-      <div className="max-w-4xl mx-auto px-4 py-3 flex items-center justify-between gap-4">
+      <div className="max-w-5xl mx-auto px-4 py-3 flex items-center justify-between gap-4">
         
         {/* Brand / Logo */}
         <div 
-          onClick={() => setActiveTab('inbox')}
+          onClick={() => setActiveTab('wall')}
           className="flex items-center gap-2.5 cursor-pointer group"
         >
           <div className="w-9 h-9 rounded-full border border-[#8e1b1b] bg-[#fcf8f0] flex items-center justify-center text-[#8e1b1b] shadow-inner group-hover:scale-105 transition-transform">
@@ -22,24 +22,24 @@ export const Header = ({ activeTab, setActiveTab }) => {
               The Little Pots
             </h1>
             <p className="text-[10px] font-typewriter text-[#7e5a3e] tracking-wide mt-0.5">
-              Postal Dispatches
+              Public Wall & Text Exchange
             </p>
           </div>
         </div>
 
-        {/* Clean Unified Navigation */}
+        {/* Unified Navigation: Pots Wall | Compose | Profile */}
         <div className="flex items-center gap-2">
           <nav className="flex items-center gap-1">
             <button
-              onClick={() => setActiveTab('inbox')}
+              onClick={() => setActiveTab('wall')}
               className={`px-3 py-1.5 rounded text-xs font-typewriter flex items-center gap-1.5 transition-all cursor-pointer ${
-                activeTab === 'inbox'
+                activeTab === 'wall'
                   ? 'bg-[#e4d4bd] text-[#2c1d13] font-bold border border-[#c5b095]'
                   : 'text-[#6f5038] hover:bg-[#ede0ce]'
               }`}
             >
-              <Mail className="w-3.5 h-3.5" />
-              <span>Inbox</span>
+              <LayoutGrid className="w-3.5 h-3.5" />
+              <span>Pots Wall</span>
             </button>
 
             <button
@@ -51,7 +51,7 @@ export const Header = ({ activeTab, setActiveTab }) => {
               }`}
             >
               <Send className="w-3.5 h-3.5" />
-              <span>Compose</span>
+              <span>Cast a Pot</span>
             </button>
 
             <button
@@ -63,13 +63,13 @@ export const Header = ({ activeTab, setActiveTab }) => {
               }`}
             >
               <User className="w-3.5 h-3.5" />
-              <span>Profile</span>
+              <span>My Profile</span>
             </button>
           </nav>
 
           <div className="h-4 w-[1px] bg-[#cca780] mx-1"></div>
 
-          {/* User Handle & Logout */}
+          {/* User Identifier & Logout */}
           <div className="flex items-center gap-1.5">
             <span className="text-xs font-typewriter text-[#3d291b] font-bold hidden md:inline">
               {currentUser?.name}
@@ -83,7 +83,7 @@ export const Header = ({ activeTab, setActiveTab }) => {
             </button>
           </div>
 
-          {/* Sound Toggle */}
+          {/* Audio toggle */}
           <button
             onClick={() => setAudioEnabled(!audioEnabled)}
             title={audioEnabled ? "Mute typewriter sound" : "Enable typewriter sound"}
