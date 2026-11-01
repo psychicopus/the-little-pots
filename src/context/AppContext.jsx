@@ -38,14 +38,14 @@ export const AppProvider = ({ children }) => {
 
       return () => subscription.unsubscribe();
     } else {
-      // Local fallback session check
+      // Local fallback mode for offline testing
       const cached = localStorage.getItem('little_pots_auth_user');
       if (cached) {
         try {
           const parsed = JSON.parse(cached);
           setCurrentUser(parsed);
           setSession({ user: { id: parsed.id } });
-          loadLocalPots(parsed.id);
+          loadLocalPots();
         } catch (e) {}
       }
       setLoading(false);
@@ -70,9 +70,8 @@ export const AppProvider = ({ children }) => {
           createdAt: data.created_at
         });
       } else {
-        // Create default profile if not present
         const fallbackName = authUser.email.split('@')[0];
-        await supabase.from('profiles').insert({
+        await supabase.from('profiles').upsert({
           id: authUser.id,
           username: fallbackName,
           stamp_preference: '🌿 Cedar Leaf'
@@ -95,7 +94,8 @@ export const AppProvider = ({ children }) => {
 
   const loadPots = async (userId) => {
     try {
-      const { data, error } = await supabase
+      // 1. Fetch pots
+      const { data: potsData, error: potsErr } = await supabase
         .from('pots')
         .select(`
           id,
@@ -106,43 +106,66 @@ export const AppProvider = ({ children }) => {
           created_at,
           sender_id,
           recipient_id,
-          sender:profiles!pots_sender_id_fkey(username),
-          replies:pot_replies(
-            id,
-            content,
-            created_at,
-            author_id,
-            author:profiles!pot_replies_author_id_fkey(username)
-          )
+          profiles:sender_id(username)
         `)
         .order('created_at', { ascending: false });
 
-      if (data) {
-        const formatted = data.map(p => ({
-          id: p.id,
-          senderId: p.sender_id,
-          senderName: p.sender?.username || 'Anonymous Wanderer',
-          recipientId: p.recipient_id,
-          title: p.title,
-          content: p.content,
-          stamp: p.stamp,
-          createdAt: p.created_at,
-          replies: (p.replies || []).map(r => ({
-            id: r.id,
-            authorId: r.author_id,
-            authorName: r.author?.username || 'Stranger',
-            content: r.content,
-            createdAt: r.created_at
-          }))
-        }));
-        setPots(formatted);
+      if (potsErr) {
+        console.warn("Error fetching pots:", potsErr);
+        return;
       }
+
+      if (!potsData || potsData.length === 0) {
+        setPots([]);
+        return;
+      }
+
+      // 2. Fetch replies for these pots
+      const potIds = potsData.map(p => p.id);
+      const { data: repliesData } = await supabase
+        .from('pot_replies')
+        .select(`
+          id,
+          pot_id,
+          content,
+          created_at,
+          author_id,
+          profiles:author_id(username)
+        `)
+        .in('pot_id', potIds)
+        .order('created_at', { ascending: true });
+
+      const repliesByPot = {};
+      (repliesData || []).forEach(r => {
+        if (!repliesByPot[r.pot_id]) repliesByPot[r.pot_id] = [];
+        repliesByPot[r.pot_id].push({
+          id: r.id,
+          authorId: r.author_id,
+          authorName: r.profiles?.username || 'Stranger',
+          content: r.content,
+          createdAt: r.created_at
+        });
+      });
+
+      const formatted = potsData.map(p => ({
+        id: p.id,
+        senderId: p.sender_id,
+        senderName: p.profiles?.username || 'Anonymous Wanderer',
+        recipientId: p.recipient_id,
+        title: p.title,
+        content: p.content,
+        stamp: p.stamp,
+        createdAt: p.created_at,
+        replies: repliesByPot[p.id] || []
+      }));
+
+      setPots(formatted);
     } catch (err) {
       console.error("Error loading pots:", err);
     }
   };
 
-  const loadLocalPots = (userId) => {
+  const loadLocalPots = () => {
     const saved = localStorage.getItem('little_pots_items');
     if (saved) {
       try {
@@ -173,6 +196,8 @@ export const AppProvider = ({ children }) => {
           username,
           stamp_preference: stamp || '🌿 Cedar Leaf'
         });
+        await fetchUserProfile(data.user);
+        await loadPots(data.user.id);
       }
       return data;
     } else {
@@ -201,9 +226,12 @@ export const AppProvider = ({ children }) => {
         password
       });
       if (error) throw error;
+      if (data?.user) {
+        await fetchUserProfile(data.user);
+        await loadPots(data.user.id);
+      }
       return data;
     } else {
-      // Local fallback mode
       const localId = 'usr_' + Date.now().toString(36);
       const userObj = {
         id: localId,
@@ -238,27 +266,46 @@ export const AppProvider = ({ children }) => {
     const potStamp = stamp || currentUser?.stampPreference || '🌿 Cedar Leaf';
 
     if (isSupabaseConfigured && supabase && currentUser) {
-      const { data, error } = await supabase.rpc('cast_random_pot', {
-        p_title: potTitle,
-        p_content: potContent,
-        p_stamp: potStamp
-      });
-      if (error) {
-        // Fallback standard insert if RPC has issues
-        await supabase.from('pots').insert({
-          sender_id: currentUser.id,
-          title: potTitle,
-          content: potContent,
-          stamp: potStamp
+      try {
+        const { error: rpcErr } = await supabase.rpc('cast_random_pot', {
+          p_title: potTitle,
+          p_content: potContent,
+          p_stamp: potStamp
         });
+
+        if (rpcErr) {
+          // If RPC fails, direct fallback insert with a random existing profile
+          const { data: otherProfiles } = await supabase
+            .from('profiles')
+            .select('id')
+            .neq('id', currentUser.id)
+            .limit(10);
+
+          let chosenRecipientId = null;
+          if (otherProfiles && otherProfiles.length > 0) {
+            chosenRecipientId = otherProfiles[Math.floor(Math.random() * otherProfiles.length)].id;
+          }
+
+          await supabase.from('pots').insert({
+            sender_id: currentUser.id,
+            recipient_id: chosenRecipientId,
+            title: potTitle,
+            content: potContent,
+            stamp: potStamp
+          });
+        }
+
+        await loadPots(currentUser.id);
+      } catch (e) {
+        console.error("Cast error:", e);
       }
-      await loadPots(currentUser.id);
     } else if (currentUser) {
+      // Local testing mode
       const newPot = {
         id: 'pot_' + Date.now().toString(36),
         senderId: currentUser.id,
         senderName: currentUser.name,
-        recipientId: 'stranger_peer',
+        recipientId: 'other_user',
         title: potTitle,
         content: potContent,
         stamp: potStamp,
@@ -281,7 +328,10 @@ export const AppProvider = ({ children }) => {
         author_id: currentUser.id,
         content: replyText.trim()
       });
-      if (error) throw error;
+      if (error) {
+        console.error("Reply error:", error);
+        throw error;
+      }
       await loadPots(currentUser.id);
     } else {
       const newReply = {
@@ -355,7 +405,8 @@ export const AppProvider = ({ children }) => {
       updateProfile,
       audioEnabled,
       setAudioEnabled,
-      playTypewriterSound
+      playTypewriterSound,
+      refreshPots: () => currentUser && loadPots(currentUser.id)
     }}>
       {children}
     </AppContext.Provider>
